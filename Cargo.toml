@@ -1,0 +1,7 @@
+[package]
+name = "spacetime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+maths-traits = "0.2.1"
