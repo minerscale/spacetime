@@ -9,13 +9,18 @@
 #![feature(const_eval_select)]
 #![feature(trait_alias)]
 
+use maths_traits::analysis::OrdField;
+use maths_traits::analysis::RealExponential;
 use std::fmt::Display;
 use std::intrinsics;
 use std::intrinsics::const_make_global;
+use std::marker::PhantomData;
+use std::ops::Add;
+use std::ops::Sub;
 use std::ptr;
 use std::slice;
 
-use maths_traits::algebra::UnitalSemiring;
+use maths_traits::algebra::Field;
 
 pub const fn product(d: &[usize]) -> usize {
     let mut acc = 1;
@@ -32,14 +37,14 @@ pub const fn product(d: &[usize]) -> usize {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Tensor<const D: &'static [usize], T: UnitalSemiring>
+pub struct Tensor<const D: &'static [usize], T: Field>
 where
     [(); product(D)]:,
 {
     pub components: [T; product(D)],
 }
 
-impl<const D: &'static [usize], T: UnitalSemiring> Tensor<D, T>
+impl<const D: &'static [usize], T: Field> Tensor<D, T>
 where
     [(); product(D)]:,
 {
@@ -106,6 +111,53 @@ pub const fn concatenate(a: &'static [usize], b: &'static [usize]) -> &'static [
         vec.leak()
     }
     intrinsics::const_eval_select((a, b), const_concatenate, runtime_concatenate)
+}
+
+// ungodly evil compile time slice concatenation
+pub const fn vector(n: usize) -> &'static [usize] {
+    const fn const_vector(n: usize) -> &'static [usize] {
+        unsafe {
+            let buffer: *mut usize =
+                core::intrinsics::const_allocate(size_of::<usize>(), align_of::<usize>()).cast();
+
+            buffer.write(n);
+
+            intrinsics::const_make_global(buffer.cast());
+            slice::from_raw_parts(buffer.cast(), 1)
+        }
+    }
+    fn runtime_vector(n: usize) -> &'static [usize] {
+        let mut vec = Vec::new();
+        vec.push(n);
+        vec.leak()
+    }
+    intrinsics::const_eval_select((n,), const_vector, runtime_vector)
+}
+
+// ungodly evil compile time slice concatenation
+pub const fn christoffel(n: usize) -> &'static [usize] {
+    const fn const_christoffel(n: usize) -> &'static [usize] {
+        unsafe {
+            let buffer: *mut usize =
+                core::intrinsics::const_allocate(3 * size_of::<usize>(), align_of::<usize>())
+                    .cast();
+
+            buffer.write(n);
+            buffer.add(1).write(n);
+            buffer.add(2).write(n);
+
+            intrinsics::const_make_global(buffer.cast());
+            slice::from_raw_parts(buffer.cast(), 3)
+        }
+    }
+    fn runtime_christoffel(n: usize) -> &'static [usize] {
+        let mut vec = Vec::new();
+        vec.push(n);
+        vec.push(n);
+        vec.push(n);
+        vec.leak()
+    }
+    intrinsics::const_eval_select((n,), const_christoffel, runtime_christoffel)
 }
 
 pub const fn remove_axes_and_concatenate(
@@ -223,7 +275,45 @@ pub const fn remove_axes_two(a: &'static [usize], p: usize, q: usize) -> &'stati
     intrinsics::const_eval_select((a, p, q), const_remove_axes_two, runtime_remove_axes_two)
 }
 
-impl<const A: &'static [usize], T: UnitalSemiring> Tensor<A, T>
+impl<const A: &'static [usize], T: Field> Add<&Self> for Tensor<A, T>
+where
+    [(); product(A)]:,
+{
+    type Output = Self;
+
+    fn add(self, rhs: &Self) -> Self::Output {
+        Self::new({
+            let mut idx = 0;
+
+            self.components.map(|x| {
+                let ret = x + rhs.components[idx].clone();
+                idx += 1;
+                ret
+            })
+        })
+    }
+}
+
+impl<const A: &'static [usize], T: Field> Sub<&Self> for Tensor<A, T>
+where
+    [(); product(A)]:,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: &Self) -> Self::Output {
+        Self::new({
+            let mut idx = 0;
+
+            self.components.map(|x| {
+                let ret = x - rhs.components[idx].clone();
+                idx += 1;
+                ret
+            })
+        })
+    }
+}
+
+impl<const A: &'static [usize], T: Field> Tensor<A, T>
 where
     [(); product(A)]:,
 {
@@ -252,6 +342,12 @@ where
         }
 
         ret
+    }
+
+    pub fn scalar_product(self, s: T) -> Self {
+        Tensor {
+            components: self.components.map(|x| x * s.clone()),
+        }
     }
 
     pub fn contract<const P: usize, const Q: usize, const B: &'static [usize]>(
@@ -344,6 +440,12 @@ where
         }
 
         result
+    }
+
+    pub fn norm_squared(&self) -> T {
+        self.components
+            .iter()
+            .fold(T::zero(), |acc, v| acc + v.clone() * v.clone())
     }
 
     pub fn lower_index<const N: usize, const B: &'static [usize]>(
@@ -459,7 +561,7 @@ pub const fn make_diag(k: usize) -> &'static [usize] {
     intrinsics::const_eval_select((k,), const_make_diag, runtime_make_diag)
 }
 
-impl<const D: &'static [usize], T: Display + Clone + UnitalSemiring> Display for Tensor<D, T>
+impl<const D: &'static [usize], T: Display + Clone + Field> Display for Tensor<D, T>
 where
     [(); product(D)]:,
 {
@@ -506,11 +608,273 @@ where
     }
 }
 
+pub trait Chart<M, C: Field, const N: usize> {
+    fn to_coords(p: &M) -> Tensor<{ vector(N) }, C>
+    where
+        [(); product(vector(N))]:;
+    fn from_coords(coords: Tensor<{ vector(N) }, C>) -> M
+    where
+        [(); product(vector(N))]:;
+}
+
+pub struct TangentVector<C: Field, const N: usize, M>
+where
+    [(); product(vector(N))]:,
+{
+    pub base: M,
+    pub coords: Tensor<{ vector(N) }, C>,
+}
+
+impl<C: Field, const N: usize, M> TangentVector<C, N, M>
+where
+    [(); product(vector(N))]:,
+{
+    pub fn new(base: M, coords: Tensor<{ vector(N) }, C>) -> Self {
+        TangentVector { base, coords }
+    }
+}
+
+pub trait Connection<
+    Ch: Chart<M, C, N>,
+    M: Clone,
+    C: OrdField + Epsilon<C> + RealExponential,
+    const N: usize,
+>
+{
+    fn christoffel_symbols(at: &M) -> Tensor<{ christoffel(N) }, C>
+    where
+        [(); product(christoffel(N))]:;
+
+    fn covariant_directional_derivative<
+        const D: &'static [usize],
+        T: Field,
+        F: Fn(M) -> Tensor<D, T>,
+    >(
+        field: &TensorField<C, N, M, D, T, F>, // D must be vector(N), T = C
+        at: M,
+        along: &TangentVector<C, N, M>,
+    ) -> Tensor<D, T>
+    where
+        [(); product(D)]:,
+        [(); product(vector(N))]:,
+        [(); product(christoffel(N))]:,
+        T: Into<C>,
+        C: Into<T>,
+    {
+        // 1) Ordinary (chart) directional derivative: v^k ∂_k V^i
+        let dv = field.directional_derivative::<Ch>(at, along);
+
+        // 2) Connection correction: (Γ^i_{kℓ} v^k V^ℓ)
+        let gamma = Self::christoffel_symbols(&along.base);
+
+        let v = field.get(along.base.clone());
+        let mut out = dv.clone(); // start with dV
+
+        // Add Γ-term
+        // indices: i (out comp), k (v comp), l (V comp)
+        for i in 0..N {
+            let mut corr = C::zero();
+            for k in 0..N {
+                let vk = &along.coords.components[k];
+                if *vk == C::zero() {
+                    continue;
+                }
+                for l in 0..N {
+                    let gl = gamma.components[i * N * N + k * N + l].clone();
+                    let vl = v.components[l].clone().into();
+                    corr = corr + gl * vk.clone() * vl;
+                }
+            }
+            out.components[i] = out.components[i].clone() + corr.into();
+        }
+        out
+    }
+}
+
+pub struct TensorField<
+    C: Field,                  // Chart vector underlying type (usually a Real)
+    const N: usize,            // Manifold dimension
+    M,                         // Manifold point
+    const D: &'static [usize], // Dimensions of output tensor
+    T: Field,                  // Output tensor underlying type
+    // Map indexing the manifold returning the value on the tensor field and the chart at that point.
+    F: Fn(M) -> Tensor<D, T>,
+> where
+    [(); product(D)]:,
+{
+    tensor: F,
+    _phantom: PhantomData<(C, M, T)>,
+}
+
+pub trait Epsilon<C> {
+    const EPSILON: C;
+}
+
+impl<
+    C: OrdField + Epsilon<C> + Into<T> + RealExponential,
+    const N: usize,
+    M,
+    const D: &'static [usize],
+    T: Field,
+    F: Fn(M) -> Tensor<D, T>,
+> TensorField<C, N, M, D, T, F>
+where
+    [(); product(D)]:,
+{
+    pub fn new(f: F) -> Self {
+        TensorField {
+            tensor: f,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn get(&self, idx: M) -> Tensor<D, T> {
+        (self.tensor)(idx)
+    }
+
+    pub fn directional_derivative<Ch: Chart<M, C, N>>(
+        &self,
+        at: M,
+        along: &TangentVector<C, N, M>,
+    ) -> Tensor<D, T>
+    where
+        [(); product(vector(N))]:,
+    {
+        // 1) coordinates of the base point
+        let x0 = Ch::to_coords(&at);
+
+        // 2) pick an epsilon based on the direction scale
+        // Heuristic: epsilon = η * max(1, ||v||) with small η (e.g. 1e-6 for f64)
+        let vnorm: C = along.coords.norm_squared().sqrt();
+        let eta: C = C::EPSILON; // implement num::<C> or replace with literal if C=f64
+
+        let one: C = C::one();
+        let scale = if vnorm < one { one } else { vnorm };
+        let eps: C = eta * scale; // multiply scalars; inline if primitive
+
+        // 3) forward/back coordinates: x± = x0 ± eps * v
+        let step = along.coords.clone().scalar_product(eps.clone());
+
+        let x_plus = x0.clone() + &step;
+        let x_minus = x0.clone() - &step;
+
+        // 4) lift back to points
+        let p_plus = Ch::from_coords(x_plus);
+        let p_minus = Ch::from_coords(x_minus);
+
+        // 5) evaluate the field
+        let f_plus = &self.get(p_plus);
+        let f_minus = &self.get(p_minus);
+
+        // 6) symmetric difference
+        let two_eps: C = eps.clone() + eps;
+
+        f_plus
+            .clone()
+            .sub(f_minus)
+            .scalar_product(two_eps.inv().into()) // (f+ - f-)/(2ε)
+    }
+}
+
+impl Epsilon<f64> for f64 {
+    const EPSILON: f64 = 0.0001;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SPACETIME: &'static [usize; 2] = &[4, 4];
+
+    #[test]
+    fn test_tensor_field() {
+        // x²+y²+z² = 1
+        #[derive(Copy, Clone)]
+        struct S2(f64, f64, f64);
+
+        let a = TensorField::<f64, 2, S2, { &[2] }, f64, _>::new(|_s| Tensor::new([1.0, 0.0]));
+
+        //assert_eq!(a.get(S2(1.0, 0.0, 0.0)).components[0], 1.0);
+
+        struct StereographicNorth {}
+
+        impl Chart<S2, f64, 2> for StereographicNorth {
+            fn to_coords(p: &S2) -> Tensor<{ vector(2) }, f64>
+            where
+                [(); product(vector(2))]:,
+            {
+                let S2(x, y, z) = *p;
+
+                let denom = 1.0 - z;
+
+                Tensor::new([x / denom, y / denom])
+            }
+
+            fn from_coords(coords: Tensor<{ vector(2) }, f64>) -> S2
+            where
+                [(); product(vector(2))]:,
+            {
+                let x = coords.components[0];
+                let y = coords.components[1];
+                let r2 = x * x + y * y;
+                let denom = r2 + 1.0;
+                S2(2.0 * x / denom, 2.0 * y / denom, (r2 - 1.0) / denom)
+            }
+        }
+
+        struct RoundConnection;
+
+        impl Connection<StereographicNorth, S2, f64, 2> for RoundConnection {
+            fn christoffel_symbols(at: &S2) -> Tensor<{ christoffel(2) }, f64> {
+                // coords (X,Y)
+                let uv = StereographicNorth::to_coords(at);
+                let x = uv.components[0];
+                let y = uv.components[1];
+                let r2 = x * x + y * y;
+                let denom = 1.0 + r2;
+
+                // phi = grad ln λ = (-2x, -2y)/(1+r^2)
+                let phix = -2.0 * x / denom;
+                let phiy = -2.0 * y / denom;
+
+                // Fill Γ^i_{jk}
+                // i,j,k in {0,1} meaning x,y
+                let mut g = Tensor::<{ &[2, 2, 2] }, f64>::zero();
+
+                // Helper macros for Kronecker deltas
+                let delta = |a: usize, b: usize| if a == b { 1.0 } else { 0.0 };
+                let phi = [phix, phiy];
+
+                for i in 0..2 {
+                    for j in 0..2 {
+                        for k in 0..2 {
+                            // Γ^i_{jk} = δ^i_j φ_k + δ^i_k φ_j − δ_{jk} φ^i
+                            g.components[i * 4 + j * 2 + k] = delta(i, j) as f64 * phi[k]
+                                + delta(i, k) as f64 * phi[j]
+                                - delta(j, k) as f64 * phi[i];
+                        }
+                    }
+                }
+                g
+            }
+        }
+
+        type TwoTensor<T> = Tensor<{ &[2] }, T>;
+
+        let p = StereographicNorth::from_coords(TwoTensor::new([1.0, 0.0]));
+
+        let v = TangentVector::new(p, TwoTensor::new([1.0, 0.0]));
+
+        let nabla_v = RoundConnection::covariant_directional_derivative(&a, p, &v);
+
+        let dv = a.directional_derivative::<StereographicNorth>(p, &v);
+
+        assert!(dv.components[0].abs() < <f64 as Epsilon<f64>>::EPSILON);
+        assert!(dv.components[1].abs() < <f64 as Epsilon<f64>>::EPSILON);
+
+        assert!((nabla_v.components[0] + 1.0).abs() < <f64 as Epsilon<f64>>::EPSILON);
+        assert!(nabla_v.components[1].abs() < <f64 as Epsilon<f64>>::EPSILON);
+    }
 
     #[test]
     fn test_tensor_product() {
